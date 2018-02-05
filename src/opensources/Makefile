@@ -1,9 +1,11 @@
-SUBDIR = zlib
+SUBDIR = \
+	zlib openssl \
 
 .PHONY: all
 all:
 	for sub in $(SUBDIR); do \
 		make -C $$sub || exit 1; \
+		make -C $$sub install || exit 1; \
 		done
 
 clean:
