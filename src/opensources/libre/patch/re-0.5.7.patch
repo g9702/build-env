@@ -1,0 +1,792 @@
+diff -Naur re-0.5.7/include/re_rtp.h re-0.5.7-new/include/re_rtp.h
+--- re-0.5.7/include/re_rtp.h	2018-01-09 22:45:12.000000000 +0800
++++ re-0.5.7-new/include/re_rtp.h	2018-01-19 14:17:20.084870917 +0800
+@@ -61,14 +61,27 @@
+ 
+ /** Transport Layer Feedback Messages */
+ enum rtcp_rtpfb {
+-	RTCP_RTPFB_GNACK = 1  /**< Generic NACK */
++	RTCP_RTPFB_GNACK = 1,  /**< Generic NACK */
++	/* RTPFB types assigned in RFC 5104 */
++	RTCP_RTPFB_TMMBR = 3,
++	RTCP_RTPFB_TMMBN = 4,
++	/* PTPFB types assigned in RFC 6642 */
++	RTCP_RTPFB_TPLR  = 7,  /* Third-Party Loss Report (TPLR) */
+ };
+ 
+ /** Payload-Specific Feedback Messages */
+ enum rtcp_psfb {
+ 	RTCP_PSFB_PLI  = 1,   /**< Picture Loss Indication (PLI) */
+ 	RTCP_PSFB_SLI  = 2,   /**< Slice Loss Indication (SLI)   */
++	RTCP_PSFB_RPSI = 3,   /**< Reference Picture Selection Indication (RPSI) */
+ 	RTCP_PSFB_AFB  = 15,  /**< Application layer Feedback Messages */
++	/* PSFB types assigned in RFC 5104 */
++	RTCP_PSFB_FIR  = 4,   /* Full Intra Request (FIR) Command */
++	RTCP_PSFB_TSTR = 5,   /* Temporal-Spatial Trade-off Request (TSTR) */
++	RTCP_PSFB_TSTN = 6,   /* Temporal-Spatial Trade-off Notification (TSTN) */
++	RTCP_PSFB_VBCM = 7,   /* Video Back Channel Message (VBCM) */
++	/* PSFB types assigned in RFC 6642 */
++	RTCP_PSFB_TPLR = 8,   /* Third-Party Loss Report (TPLR) */
+ };
+ 
+ /** Reception report block */
+@@ -157,15 +170,35 @@
+ 			uint32_t n;
+ 			/** Feedback Control Information (FCI) */
+ 			union {
++				// RTPFB
+ 				struct gnack {
+-					uint16_t pid;
+-					uint16_t blp;
++					uint16_t pid; // Packet ID
++					uint16_t blp; // Bitmask of following lost packets (BLP)
+ 				} *gnackv;
++				struct tmmbr {
++					uint32_t ssrc;                // 32 bits. The SSRC value of the media sender that is requested to obey the new maximum bit rate.
++					uint32_t mxtbr_exp:6;         // 6  bits. The exponential scaling of the mantissa for the maximum total media bit rate value. unsigned integer[0..63].
++					uint32_t mxtbr_mantissa:17;   // 17 bits. The mantissa of the maximum total media bit rate value as an unsigned integer.
++					uint32_t measured_overhead:9; // 9  bits. The measured average packet overhead value in bytes. unsigned integer [0..511].
++				} *tmmbrv, *tmmbnv;
++
++				// PSFB
+ 				struct sli {
+-					uint16_t first;
+-					uint16_t number;
+-					uint8_t picid;
++					uint32_t first:13;    // 13 bits. The macroblock (MB) address of the first lost macroblock.
++					uint32_t number:13;   // 13 bits. The number of lost macroblocks, in scan order as discussed above.
++					uint32_t picid:6;     // 6  bits
+ 				} *sliv;
++				struct fir {
++					uint32_t ssrc;        // 32 bits. The SSRC value of the media sender that is requested to send a decoder refresh point.
++					uint32_t seq_nr:8;    // 8  bits
++					uint32_t reserved:24; // 24 bits
++				} *firv;
++				struct tstr {
++					uint32_t ssrc;        // 32 bits. The SSRC of the media sender that is requested to apply the trade-off value given in Index.
++					uint32_t seq_nr:8;    // 8  bits. Request sequence number. The sequence number SHALL be increased by 1 modulo 256 for each new command.
++					uint32_t reserved:19; // 19 bits
++					uint32_t index:5;     // 5  bits. An integer value between 0 and 31 that indicates the relative trade-off that is requested.
++				} *tstrv, *tstnv;
+ 				struct mbuf *afb;
+ 				void *p;
+ 			} fci;
+@@ -199,6 +232,7 @@
+ 
+ /* RTP api */
+ int   rtp_alloc(struct rtp_sock **rsp);
++int   rtp_set_ssrc(struct rtp_sock *rs, uint32_t ssrc);
+ int   rtp_listen(struct rtp_sock **rsp, int proto, const struct sa *ip,
+ 		 uint16_t min_port, uint16_t max_port, bool enable_rtcp,
+ 		 rtp_recv_h *recvh, rtcp_recv_h *rtcph, void *arg);
+@@ -213,11 +247,16 @@
+ void *rtp_sock(const struct rtp_sock *rs);
+ uint32_t rtp_sess_ssrc(const struct rtp_sock *rs);
+ const struct sa *rtp_local(const struct rtp_sock *rs);
++struct rtcp_sess *rtp_rtcp_sess(const struct rtp_sock *rs);
++struct srtp *rtp_get_srtp(struct rtp_sock *rs);
++int   rtp_set_srtp(struct rtp_sock *rs, struct srtp *srtp);
+ 
+ /* RTCP session api */
+ void  rtcp_start(struct rtp_sock *rs, const char *cname,
+ 		 const struct sa *peer);
+ void  rtcp_enable_mux(struct rtp_sock *rs, bool enabled);
++void  rtcp_set_interval(struct rtcp_sess *sess, uint64_t delay);
++void  rtcp_set_tmmbn(struct rtcp_sess *sess, uint8_t exponent, uint32_t mantissa, uint16_t overhead);
+ void  rtcp_set_srate(struct rtp_sock *rs, uint32_t sr_tx, uint32_t sr_rx);
+ void  rtcp_set_srate_tx(struct rtp_sock *rs, uint32_t srate_tx);
+ void  rtcp_set_srate_rx(struct rtp_sock *rs, uint32_t srate_rx);
+@@ -225,7 +264,14 @@
+ 		    const uint8_t *data, size_t len);
+ int   rtcp_send_fir(struct rtp_sock *rs, uint32_t ssrc);
+ int   rtcp_send_nack(struct rtp_sock *rs, uint16_t fsn, uint16_t blp);
+-int   rtcp_send_pli(struct rtp_sock *rs, uint32_t fb_ssrc);
++int   rtcp_send_psfb_pli(struct rtp_sock *rs, uint32_t fb_ssrc);
++int   rtcp_send_psfb_sli(struct rtp_sock *rs, uint32_t fb_ssrc, uint16_t first, uint16_t number, uint8_t picid);
++int   rtcp_send_psfb_fir(struct rtp_sock *rs, uint32_t fb_ssrc, uint8_t seq_nr);
++int   rtcp_send_psfb_tstr(struct rtp_sock *rs, uint32_t fb_ssrc, uint8_t seq_nr, uint8_t index);
++int   rtcp_send_psfb_tstn(struct rtp_sock *rs, uint32_t fb_ssrc, uint8_t seq_nr, uint8_t index);
++int   rtcp_send_rtpfb_gnack(struct rtp_sock *rs, uint32_t fb_ssrc, uint16_t pid, uint16_t blp);
++int   rtcp_send_rtpfb_tmmbr(struct rtp_sock *rs, uint32_t fb_ssrc, uint32_t bitrates, uint16_t overhead);
++int   rtcp_send_rtpfb_tmmbn(struct rtp_sock *rs, uint32_t fb_ssrc, uint8_t exponent, uint32_t mantissa, uint16_t overhead);
+ int   rtcp_debug(struct re_printf *pf, const struct rtp_sock *rs);
+ void *rtcp_sock(const struct rtp_sock *rs);
+ int   rtcp_stats(struct rtp_sock *rs, uint32_t ssrc, struct rtcp_stats *stats);
+diff -Naur re-0.5.7/include/re_websock.h re-0.5.7-new/include/re_websock.h
+--- re-0.5.7/include/re_websock.h	2018-01-09 22:45:12.000000000 +0800
++++ re-0.5.7-new/include/re_websock.h	2018-01-19 14:19:07.924871896 +0800
+@@ -61,6 +61,8 @@
+ 		   struct http_conn *htconn, const struct http_msg *msg,
+ 		   unsigned kaint, websock_recv_h *recvh,
+ 		   websock_close_h *closeh, void *arg);
++int websock_send_mem(struct websock_conn *conn, enum websock_opcode opcode,
++		 enum websock_scode scode, char *buf, size_t buf_size);
+ int websock_send(struct websock_conn *conn, enum websock_opcode opcode,
+ 		 const char *fmt, ...);
+ int websock_close(struct websock_conn *conn, enum websock_scode scode,
+diff -Naur re-0.5.7/mk/re.mk re-0.5.7-new/mk/re.mk
+--- re-0.5.7/mk/re.mk	2018-01-09 22:45:12.000000000 +0800
++++ re-0.5.7-new/mk/re.mk	2018-01-19 14:17:20.084870917 +0800
+@@ -477,7 +477,7 @@
+ endif
+ 
+ USE_OPENSSL_AES		:= yes
+-USE_OPENSSL_HMAC	:= yes
++#USE_OPENSSL_HMAC	:= yes
+ 
+ endif
+ 
+diff -Naur re-0.5.7/src/rtp/fb.c re-0.5.7-new/src/rtp/fb.c
+--- re-0.5.7/src/rtp/fb.c	2018-01-09 22:45:12.000000000 +0800
++++ re-0.5.7-new/src/rtp/fb.c	2018-01-19 14:17:20.068870917 +0800
+@@ -22,7 +22,12 @@
+ 
+ enum {
+ 	GNACK_SIZE = 4,
+-	SLI_SIZE   = 4
++	TMMBR_SIZE = 8,
++	TMMBN_SIZE = 8,
++	SLI_SIZE   = 4,
++	FIR_SIZE   = 8,
++	TSTR_SIZE  = 8,
++	TSTN_SIZE  = 8,
+ };
+ 
+ 
+@@ -38,11 +43,20 @@
+  *
+  * @return 0 for success, otherwise errorcode
+  */
+-int rtcp_rtpfb_gnack_encode(struct mbuf *mb, uint16_t pid, uint16_t blp)
++int rtcp_rtpfb_gnack_encode(struct mbuf *mb, struct gnack *gnackv)
+ {
+ 	int err;
+-	err  = mbuf_write_u16(mb, htons(pid));
+-	err |= mbuf_write_u16(mb, htons(blp));
++	err  = mbuf_write_u16(mb, htons(gnackv->pid));
++	err |= mbuf_write_u16(mb, htons(gnackv->blp));
++	return err;
++}
++
++int rtcp_rtpfb_tmmbr_encode(struct mbuf *mb, struct tmmbr *tmmbrv)
++{
++	uint32_t v = (tmmbrv->mxtbr_exp & 0x3F) << 26 | (tmmbrv->mxtbr_mantissa & 0x1FFFF) << 9 | (tmmbrv->measured_overhead & 0x1FF);
++	int err;
++	err  = mbuf_write_u32(mb, htonl(tmmbrv->ssrc));
++	err |= mbuf_write_u32(mb, htonl(v));
+ 	return err;
+ }
+ 
+@@ -57,13 +71,30 @@
+  *
+  * @return 0 for success, otherwise errorcode
+  */
+-int rtcp_psfb_sli_encode(struct mbuf *mb, uint16_t first, uint16_t number,
+-			 uint8_t picid)
++int rtcp_psfb_sli_encode(struct mbuf *mb, struct sli *sliv)
+ {
+-	const uint32_t v = first<<19 | number<<6 | picid;
++	uint32_t v = (sliv->first & 0x1FFF) << 19 | (sliv->number & 0x1FFF) << 6 | (sliv->picid & 0x3F);
+ 	return mbuf_write_u32(mb, htonl(v));
+ }
+ 
++int rtcp_psfb_fir_encode(struct mbuf *mb, struct fir *firv)
++{
++	uint32_t v = firv->seq_nr << 24 | (firv->reserved & 0xFFFFFF);
++	int err;
++	err  = mbuf_write_u32(mb, htonl(firv->ssrc));
++	err |= mbuf_write_u32(mb, htonl(v));
++	return err;
++}
++
++int rtcp_psfb_tstr_encode(struct mbuf *mb, struct tstr *tstrv)
++{
++	uint32_t v = tstrv->seq_nr << 24 | (tstrv->reserved & 0x7FFFF) << 5 | (tstrv->index & 0x1F);
++	int err;
++	err  = mbuf_write_u32(mb, htonl(tstrv->ssrc));
++	err |= mbuf_write_u32(mb, htonl(v));
++	return err;
++}
++
+ 
+ /* Decode functions */
+ 
+@@ -93,12 +124,50 @@
+ 
+ 		if (mbuf_get_left(mb) < msg->r.fb.n * GNACK_SIZE)
+ 			return EBADMSG;
+-		for (i=0; i<msg->r.fb.n; i++) {
++		for (i = 0; i < msg->r.fb.n; i++) {
+ 			msg->r.fb.fci.gnackv[i].pid = ntohs(mbuf_read_u16(mb));
+ 			msg->r.fb.fci.gnackv[i].blp = ntohs(mbuf_read_u16(mb));
+ 		}
+ 		break;
+ 
++	case RTCP_RTPFB_TMMBR:
++		msg->r.fb.n /= 2;
++		sz = msg->r.fb.n * sizeof(*msg->r.fb.fci.tmmbrv);
++		msg->r.fb.fci.tmmbrv = mem_alloc(sz, NULL);
++		if (!msg->r.fb.fci.tmmbrv)
++			return ENOMEM;
++
++		if (mbuf_get_left(mb) < msg->r.fb.n * TMMBR_SIZE)
++			return EBADMSG;
++
++		for (i = 0; i < msg->r.fb.n; i++) {
++			msg->r.fb.fci.tmmbrv[i].ssrc = ntohl(mbuf_read_u32(mb));
++			const uint32_t v = ntohl(mbuf_read_u32(mb));
++			msg->r.fb.fci.tmmbrv[i].mxtbr_exp         = (v >> 26) & 0x3F;
++			msg->r.fb.fci.tmmbrv[i].mxtbr_mantissa    = (v >> 9)  & 0x1FFFF;
++			msg->r.fb.fci.tmmbrv[i].measured_overhead = (v)       & 0x1FF;
++		}
++		break;
++
++	case RTCP_RTPFB_TMMBN:
++		msg->r.fb.n /= 2;
++		sz = msg->r.fb.n * sizeof(*msg->r.fb.fci.tmmbnv);
++		msg->r.fb.fci.tmmbnv = mem_alloc(sz, NULL);
++		if (!msg->r.fb.fci.tmmbnv)
++			return ENOMEM;
++
++		if (mbuf_get_left(mb) < msg->r.fb.n * TMMBN_SIZE)
++			return EBADMSG;
++
++		for (i = 0; i < msg->r.fb.n; i++) {
++			msg->r.fb.fci.tmmbnv[i].ssrc = ntohl(mbuf_read_u32(mb));
++			const uint32_t v = ntohl(mbuf_read_u32(mb));
++			msg->r.fb.fci.tmmbnv[i].mxtbr_exp         = (v >> 26) & 0x3F;
++			msg->r.fb.fci.tmmbnv[i].mxtbr_mantissa    = (v >> 9)  & 0x1FFFF;
++			msg->r.fb.fci.tmmbnv[i].measured_overhead = (v)       & 0x1FF;
++		}
++		break;
++
+ 	default:
+ 		DEBUG_NOTICE("unknown RTPFB fmt %d\n", msg->hdr.count);
+ 		break;
+@@ -139,10 +208,9 @@
+ 			return EBADMSG;
+ 		for (i=0; i<msg->r.fb.n; i++) {
+ 			const uint32_t v = ntohl(mbuf_read_u32(mb));
+-
+-			msg->r.fb.fci.sliv[i].first  = v>>19 & 0x1fff;
+-			msg->r.fb.fci.sliv[i].number = v>> 6 & 0x1fff;
+-			msg->r.fb.fci.sliv[i].picid  = v>> 0 & 0x003f;
++			msg->r.fb.fci.sliv[i].first  = (v >> 19) & 0x1fff;
++			msg->r.fb.fci.sliv[i].number = (v >>  6) & 0x1fff;
++			msg->r.fb.fci.sliv[i].picid  = (v      ) & 0x003f;
+ 		}
+ 		break;
+ 
+@@ -160,6 +228,62 @@
+ 		mbuf_advance(mb, sz);
+ 		break;
+ 
++	case RTCP_PSFB_FIR:
++		msg->r.fb.n /= 2;
++		sz = msg->r.fb.n * sizeof(*msg->r.fb.fci.firv);
++		msg->r.fb.fci.firv = mem_alloc(sz, NULL);
++		if (!msg->r.fb.fci.firv)
++			return ENOMEM;
++
++		if (mbuf_get_left(mb) < msg->r.fb.n * FIR_SIZE)
++			return EBADMSG;
++
++		for (i = 0; i < msg->r.fb.n; i++) {
++			msg->r.fb.fci.firv[i].ssrc     = ntohl(mbuf_read_u32(mb));
++			const uint32_t v = ntohl(mbuf_read_u32(mb));
++			msg->r.fb.fci.firv[i].seq_nr   = (v >> 24) & 0xFF;
++			msg->r.fb.fci.firv[i].reserved = (v      ) & 0xFFFFFF;
++		}
++		break;
++
++	case RTCP_PSFB_TSTR:
++		msg->r.fb.n /= 2;
++		sz = msg->r.fb.n * sizeof(*msg->r.fb.fci.tstrv);
++		msg->r.fb.fci.tstrv = mem_alloc(sz, NULL);
++		if (!msg->r.fb.fci.tstrv)
++			return ENOMEM;
++
++		if (mbuf_get_left(mb) < msg->r.fb.n * TSTR_SIZE)
++			return EBADMSG;
++
++		for (i = 0; i < msg->r.fb.n; i++) {
++			msg->r.fb.fci.tstrv[i].ssrc     = ntohl(mbuf_read_u32(mb));
++			const uint32_t v = ntohl(mbuf_read_u32(mb));
++			msg->r.fb.fci.tstrv[i].seq_nr   = (v >> 24) & 0xFF;
++			msg->r.fb.fci.tstrv[i].reserved = (v >>  5) & 0x7FFFFF;
++			msg->r.fb.fci.tstrv[i].index    = (v      ) & 0x1F;
++		}
++		break;
++
++	case RTCP_PSFB_TSTN:
++		msg->r.fb.n /= 2;
++		sz = msg->r.fb.n * sizeof(*msg->r.fb.fci.tstnv);
++		msg->r.fb.fci.tstnv = mem_alloc(sz, NULL);
++		if (!msg->r.fb.fci.tstnv)
++			return ENOMEM;
++
++		if (mbuf_get_left(mb) < msg->r.fb.n * TSTN_SIZE)
++			return EBADMSG;
++
++		for (i = 0; i < msg->r.fb.n; i++) {
++			msg->r.fb.fci.tstnv[i].ssrc     = ntohl(mbuf_read_u32(mb));
++			const uint32_t v = ntohl(mbuf_read_u32(mb));
++			msg->r.fb.fci.tstnv[i].seq_nr   = (v >> 24) & 0xFF;
++			msg->r.fb.fci.tstnv[i].reserved = (v >>  5) & 0x7FFFFF;
++			msg->r.fb.fci.tstnv[i].index    = (v      ) & 0x1F;
++		}
++		break;
++
+ 	default:
+ 		DEBUG_NOTICE("unknown PSFB fmt %d\n", msg->hdr.count);
+ 		break;
+diff -Naur re-0.5.7/src/rtp/rtcp.c re-0.5.7-new/src/rtp/rtcp.c
+--- re-0.5.7/src/rtp/rtcp.c	2018-01-09 22:45:12.000000000 +0800
++++ re-0.5.7-new/src/rtp/rtcp.c	2018-01-19 14:17:20.068870917 +0800
+@@ -97,12 +97,107 @@
+  *
+  * @return 0 for success, otherwise errorcode
+  */
+-int rtcp_send_pli(struct rtp_sock *rs, uint32_t fb_ssrc)
++int rtcp_send_psfb_pli(struct rtp_sock *rs, uint32_t fb_ssrc)
+ {
+-	return rtcp_quick_send(rs, RTCP_PSFB, RTCP_PSFB_PLI,
+-			       rtp_sess_ssrc(rs), fb_ssrc, NULL, NULL);
++	return rtcp_quick_send(rs, RTCP_PSFB, RTCP_PSFB_PLI, rtp_sess_ssrc(rs), fb_ssrc, NULL, NULL);
+ }
+ 
++int rtcp_send_psfb_sli(struct rtp_sock *rs, uint32_t fb_ssrc, uint16_t first, uint16_t number, uint8_t picid)
++{
++	struct sli sliv;
++	sliv.first  = first;
++	sliv.number = number;
++	sliv.picid  = picid;
++
++	return rtcp_quick_send(rs, RTCP_PSFB, RTCP_PSFB_SLI,
++			rtp_sess_ssrc(rs), fb_ssrc,
++			rtcp_psfb_sli_encode, (void*)&sliv);
++}
++
++int rtcp_send_psfb_fir(struct rtp_sock *rs, uint32_t fb_ssrc, uint8_t seq_nr)
++{
++	struct fir firv;
++	firv.ssrc     = fb_ssrc;
++	firv.seq_nr   = seq_nr;
++	firv.reserved = 0;
++
++	return rtcp_quick_send(rs, RTCP_PSFB, RTCP_PSFB_FIR,
++			rtp_sess_ssrc(rs), fb_ssrc,
++			rtcp_psfb_fir_encode, (void*)&firv);
++}
++
++int rtcp_send_psfb_tstr(struct rtp_sock *rs, uint32_t fb_ssrc, uint8_t seq_nr, uint8_t index)
++{
++	struct tstr tstrv;
++	tstrv.ssrc     = fb_ssrc;
++	tstrv.seq_nr   = seq_nr;
++	tstrv.reserved = 0;
++	tstrv.index    = index;
++
++	return rtcp_quick_send(rs, RTCP_PSFB, RTCP_PSFB_TSTR,
++			rtp_sess_ssrc(rs), fb_ssrc,
++			rtcp_psfb_tstr_encode, (void*)&tstrv);
++}
++
++int rtcp_send_psfb_tstn(struct rtp_sock *rs, uint32_t fb_ssrc, uint8_t seq_nr, uint8_t index)
++{
++	struct tstr tstrv;
++	tstrv.ssrc     = fb_ssrc;
++	tstrv.seq_nr   = seq_nr;
++	tstrv.reserved = 0;
++	tstrv.index    = index;
++
++	return rtcp_quick_send(rs, RTCP_PSFB, RTCP_PSFB_TSTN,
++			rtp_sess_ssrc(rs), fb_ssrc,
++			rtcp_psfb_tstr_encode, (void*)&tstrv);
++}
++
++int rtcp_send_rtpfb_gnack(struct rtp_sock *rs, uint32_t fb_ssrc, uint16_t pid, uint16_t blp)
++{
++	struct gnack gnackv;
++	gnackv.pid = pid;
++	gnackv.blp = blp;
++
++	return rtcp_quick_send(rs, RTCP_RTPFB, RTCP_RTPFB_GNACK,
++			rtp_sess_ssrc(rs), fb_ssrc,
++			rtcp_rtpfb_gnack_encode, (void*)&gnackv);
++}
++
++int rtcp_send_rtpfb_tmmbr(struct rtp_sock *rs, uint32_t fb_ssrc, uint32_t bitrates, uint16_t overhead)
++{
++	uint8_t  exponent     = 0;
++	uint32_t mantissa     = 0;
++	uint32_t max_mantissa = 0x1FFFF;
++
++	mantissa = bitrates;
++	while (mantissa > max_mantissa) {
++		mantissa >>= 1;
++		++exponent;
++	}
++
++	struct tmmbr tmmbrv;
++	tmmbrv.ssrc              = fb_ssrc;
++	tmmbrv.mxtbr_exp         = exponent;
++	tmmbrv.mxtbr_mantissa    = mantissa;
++	tmmbrv.measured_overhead = overhead;
++
++	return rtcp_quick_send(rs, RTCP_RTPFB, RTCP_RTPFB_TMMBR,
++			rtp_sess_ssrc(rs), fb_ssrc,
++			rtcp_rtpfb_tmmbr_encode, (void*)&tmmbrv);
++}
++
++int rtcp_send_rtpfb_tmmbn(struct rtp_sock *rs, uint32_t fb_ssrc, uint8_t exponent, uint32_t mantissa, uint16_t overhead)
++{
++	struct tmmbr tmmbrv;
++	tmmbrv.ssrc              = fb_ssrc;
++	tmmbrv.mxtbr_exp         = exponent;
++	tmmbrv.mxtbr_mantissa    = mantissa;
++	tmmbrv.measured_overhead = overhead;
++
++	return rtcp_quick_send(rs, RTCP_RTPFB, RTCP_RTPFB_TMMBN,
++			rtp_sess_ssrc(rs), fb_ssrc,
++			rtcp_rtpfb_tmmbr_encode, (void*)&tmmbrv);
++}
+ 
+ const char *rtcp_type_name(enum rtcp_type type)
+ {
+diff -Naur re-0.5.7/src/rtp/rtcp.h re-0.5.7-new/src/rtp/rtcp.h
+--- re-0.5.7/src/rtp/rtcp.h	2018-01-09 22:45:12.000000000 +0800
++++ re-0.5.7-new/src/rtp/rtcp.h	2018-01-19 14:17:20.068870917 +0800
+@@ -80,9 +80,12 @@
+ int rtcp_sdes_decode(struct mbuf *mb, struct rtcp_sdes *sdes);
+ 
+ /* RTCP Feedback */
+-int rtcp_rtpfb_gnack_encode(struct mbuf *mb, uint16_t pid, uint16_t blp);
+-int rtcp_psfb_sli_encode(struct mbuf *mb, uint16_t first, uint16_t number,
+-			 uint8_t picid);
++int rtcp_rtpfb_gnack_encode(struct mbuf *mb, struct gnack *gnackv);
++int rtcp_rtpfb_tmmbr_encode(struct mbuf *mb, struct tmmbr *tmmbrv);
++int rtcp_psfb_sli_encode(struct mbuf *mb, struct sli *sliv);
++int rtcp_psfb_fir_encode(struct mbuf *mb, struct fir *firv);
++int rtcp_psfb_tstr_encode(struct mbuf *mb, struct tstr *tstrv);
++
+ int rtcp_rtpfb_decode(struct mbuf *mb, struct rtcp_msg *msg);
+ int rtcp_psfb_decode(struct mbuf *mb, struct rtcp_msg *msg);
+ 
+@@ -111,6 +114,7 @@
+ 
+ int  rtcp_sess_alloc(struct rtcp_sess **sessp, struct rtp_sock *rs);
+ int  rtcp_enable(struct rtcp_sess *sess, bool enabled, const char *cname);
++int  rtcp_send_report(struct rtcp_sess *sess);
+ int  rtcp_send(struct rtp_sock *rs, struct mbuf *mb);
+ void rtcp_handler(struct rtcp_sess *sess, struct rtcp_msg *msg);
+ void rtcp_sess_tx_rtp(struct rtcp_sess *sess, uint32_t ts,
+diff -Naur re-0.5.7/src/rtp/rtp.c re-0.5.7-new/src/rtp/rtp.c
+--- re-0.5.7/src/rtp/rtp.c	2018-01-09 22:45:12.000000000 +0800
++++ re-0.5.7-new/src/rtp/rtp.c	2018-01-19 14:17:20.068870917 +0800
+@@ -13,6 +13,7 @@
+ #include <re_sys.h>
+ #include <re_net.h>
+ #include <re_udp.h>
++#include <re_srtp.h>
+ #include <re_rtp.h>
+ #include "rtcp.h"
+ 
+@@ -38,6 +39,7 @@
+ 	rtcp_recv_h *rtcph;     /**< RTCP Receive handler  */
+ 	void *arg;              /**< Handler argument      */
+ 	struct rtcp_sess *rtcp; /**< RTCP Session          */
++	struct srtp *srtp;
+ 	bool rtcp_mux;          /**< RTP/RTCP multiplexing */
+ };
+ 
+@@ -158,6 +160,8 @@
+ 
+ 	mem_deref(rs->sock_rtp);
+ 	mem_deref(rs->sock_rtcp);
++
++	mem_deref(rs->srtp);
+ }
+ 
+ 
+@@ -196,11 +200,21 @@
+ 		pt = mbuf_buf(mb)[1] & 0x7f;
+ 
+ 		if (64 <= pt && pt <= 95) {
++			if (rs->srtp) {
++				err = srtcp_decrypt(rs->srtp, mb);
++				if (err)
++					return;
++			}
+ 			rtcp_recv_handler(src, mb, arg);
+ 			return;
+ 		}
+ 	}
+ 
++	if (rs->srtp) {
++		err = srtp_decrypt(rs->srtp, mb);
++		if (err)
++			return;
++	}
+ 	err = rtp_decode(rs, mb, &hdr);
+ 	if (err)
+ 		return;
+@@ -282,6 +296,11 @@
+ 	return 0;
+ }
+ 
++int rtp_set_ssrc(struct rtp_sock *rs, uint32_t ssrc)
++{
++	rs->enc.ssrc = ssrc;
++	return 0;
++}
+ 
+ /**
+  * Listen on an RTP/RTCP Socket
+@@ -452,6 +471,12 @@
+ 
+ 	mb->pos = pos;
+ 
++	if (rs->srtp) {
++		err = srtp_encrypt(rs->srtp, mb);
++		if (err)
++			return err;
++	}
++
+ 	return udp_send(rs->sock_rtp, dst, mb);
+ }
+ 
+@@ -520,6 +545,28 @@
+ 	return rs ? rs->rtcp : NULL;
+ }
+ 
++/**
++ * Set the SRTP handler for an RTP/RTCP Socket
++ *
++ * @param rs RTP Socket
++ * @param srtp SRTP Handler
++ *
++ * @return SRTP handler
++ */
++int rtp_set_srtp(struct rtp_sock *rs, struct srtp *srtp)
++{
++	if (!rs || !srtp)
++		return EINVAL;
++	rs->srtp = srtp;
++	return 0;
++}
++
++struct srtp *rtp_get_srtp(struct rtp_sock *rs)
++{
++	return rs ? rs->srtp : NULL;
++}
++
++
+ 
+ /**
+  * Start the RTCP Session
+@@ -569,6 +616,12 @@
+ 	if (!rs || !rs->sock_rtcp || !sa_isset(&rs->rtcp_peer, SA_ALL))
+ 		return EINVAL;
+ 
++	if (rs->srtp) {
++		int err = srtcp_encrypt(rs->srtp, mb);
++		if (err)
++			return err;
++	}
++
+ 	return udp_send(rs->rtcp_mux ? rs->sock_rtp : rs->sock_rtcp,
+ 			&rs->rtcp_peer, mb);
+ }
+diff -Naur re-0.5.7/src/rtp/sess.c re-0.5.7-new/src/rtp/sess.c
+--- re-0.5.7/src/rtp/sess.c	2018-01-09 22:45:12.000000000 +0800
++++ re-0.5.7-new/src/rtp/sess.c	2018-01-19 14:17:20.068870917 +0800
+@@ -54,6 +54,8 @@
+ 	uint32_t senderc;           /**< Number of senders                   */
+ 	uint32_t srate_tx;          /**< Transmit sampling rate              */
+ 	uint32_t srate_rx;          /**< Receive sampling rate               */
++	uint64_t interval;
++	uint32_t tmmbn_compact;
+ 
+ 	/* stats */
+ 	struct lock *lock;          /**< Lock for txstat                     */
+@@ -214,21 +216,19 @@
+ 		return;
+ 
+ 	switch (msg->hdr.pt) {
+-
+-	case RTCP_SR:
+-		handle_incoming_sr(sess, msg);
+-		break;
+-
+-	case RTCP_RR:
+-		handle_incoming_rr(sess, msg);
+-		break;
+-
+-	case RTCP_BYE:
+-		handle_incoming_bye(sess, msg);
+-		break;
+-
+-	default:
+-		break;
++               case RTCP_FIR:   break;
++               case RTCP_NACK:  break;
++               case RTCP_SR:    handle_incoming_sr  (sess, msg); break;
++               case RTCP_RR:    handle_incoming_rr  (sess, msg); break;
++               case RTCP_SDES:  break;
++               case RTCP_BYE:   handle_incoming_bye (sess, msg); break;
++               case RTCP_APP:   break;
++               case RTCP_RTPFB: break;
++               case RTCP_PSFB:  break;
++               case RTCP_XR:    break;
++               case RTCP_AVB:   break;
++               default:
++                                break;
+ 	}
+ }
+ 
+@@ -256,6 +256,7 @@
+ 	if (err)
+ 		goto out;
+ 
++	sess->interval = RTCP_INTERVAL;
+  out:
+ 	if (err)
+ 		mem_deref(sess);
+@@ -336,6 +337,16 @@
+ 	return 0;
+ }
+ 
++void rtcp_set_interval(struct rtcp_sess *sess, uint64_t delay)
++{
++	sess->interval = delay;
++}
++
++void rtcp_set_tmmbn(struct rtcp_sess *sess, uint8_t exponent, uint32_t mantissa, uint16_t overhead)
++{
++	sess->tmmbn_compact = (exponent & 0x3F) << 26 | (mantissa & 0x1FFFF) << 9 | (overhead & 0x1FF);
++}
++
+ 
+ /** Calculate LSR (middle 32 bits out of 64 in the NTP timestamp) */
+ static uint32_t calc_lsr(const struct ntp_time *last_sr)
+@@ -437,8 +448,24 @@
+ 	return rtcp_encode(mb, RTCP_SDES, 1, sdes_encode_handler, sess);
+ }
+ 
++static int tmmbn_encode_handler(struct mbuf *mb, void *arg)
++{
++	struct rtcp_sess *sess = arg;
++
++	int err = 0;
++	err  = mbuf_write_u32(mb, htonl(rtp_sess_ssrc(sess->rs)));
++	err |= mbuf_write_u32(mb, htonl(sess->tmmbn_compact));
++	sess->tmmbn_compact = 0;
++	return err;
++}
++
++static int mk_tmmbn(struct rtcp_sess *sess, struct mbuf *mb)
++{
++	if (!sess->tmmbn_compact) return 0;
++	return rtcp_encode(mb, RTCP_RTPFB, RTCP_RTPFB_TMMBN, rtp_sess_ssrc(sess->rs), 0, tmmbn_encode_handler, sess);
++}
+ 
+-static int send_rtcp_report(struct rtcp_sess *sess)
++int rtcp_send_report(struct rtcp_sess *sess)
+ {
+ 	struct mbuf *mb;
+ 	int err;
+@@ -451,6 +478,7 @@
+ 
+ 	err  = mk_sr(sess, mb);
+ 	err |= mk_sdes(sess, mb);
++	err |= mk_tmmbn(sess, mb);
+ 	if (err)
+ 		goto out;
+ 
+@@ -496,7 +524,7 @@
+ 	struct rtcp_sess *sess = arg;
+ 	int err;
+ 
+-	err = send_rtcp_report(sess);
++	err = rtcp_send_report(sess);
+ 	if (err) {
+ 		DEBUG_WARNING("Send RTCP report failed: %m\n", err);
+ 	}
+@@ -507,7 +535,7 @@
+ 
+ static void schedule(struct rtcp_sess *sess)
+ {
+-	tmr_start(&sess->tmr, RTCP_INTERVAL, timeout, sess);
++	tmr_start(&sess->tmr, sess->interval, timeout, sess);
+ }
+ 
+ 
+diff -Naur re-0.5.7/src/srtp/srtp.c re-0.5.7-new/src/srtp/srtp.c
+--- re-0.5.7/src/srtp/srtp.c	2018-01-09 22:45:12.000000000 +0800
++++ re-0.5.7-new/src/srtp/srtp.c	2018-01-19 14:17:20.072870917 +0800
+@@ -189,7 +189,7 @@
+ 
+ 	if (comp->hmac) {
+ 		const size_t tag_start = mb->end;
+-		uint8_t tag[SHA_DIGEST_LENGTH];
++		uint8_t tag[SHA_DIGEST_LENGTH] = {0};
+ 
+ 		mb->pos = tag_start;
+ 
+diff -Naur re-0.5.7/src/websock/websock.c re-0.5.7-new/src/websock/websock.c
+--- re-0.5.7/src/websock/websock.c	2018-01-09 22:45:12.000000000 +0800
++++ re-0.5.7-new/src/websock/websock.c	2018-01-19 14:17:20.072870917 +0800
+@@ -652,6 +652,52 @@
+ 	return err;
+ }
+ 
++int websock_send_mem(struct websock_conn *conn, enum websock_opcode opcode, enum websock_scode scode, char *buf, size_t buf_size)
++{
++	const size_t hsz = conn->active ? 14 : 10;
++	size_t len, start;
++	struct mbuf *mb;
++	int err = 0;
++
++	if (conn->state != OPEN)
++		return ENOTCONN;
++
++	mb = mbuf_alloc(2048);
++	if (!mb)
++		return ENOMEM;
++
++	mb->pos = hsz;
++
++	if (scode)
++		err |= mbuf_write_u16(mb, htons(scode));
++	err |= mbuf_write_mem(mb, buf, buf_size);
++	if (err)
++		goto out;
++
++	len = mb->pos - hsz;
++
++	if (len > 0xffff)
++		start = mb->pos = 0;
++	else if (len > 125)
++		start = mb->pos = 6;
++	else
++		start = mb->pos = 8;
++
++	err = websock_encode(mb, true, opcode, conn->active, len);
++	if (err)
++		goto out;
++
++	mb->pos = start;
++
++	err = tcp_send(conn->tc, mb);
++	if (err)
++		goto out;
++
++ out:
++	mem_deref(mb);
++
++	return err;
++}
+ 
+ int websock_send(struct websock_conn *conn, enum websock_opcode opcode,
+ 		 const char *fmt, ...)

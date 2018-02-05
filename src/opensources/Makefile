@@ -1,5 +1,7 @@
 SUBDIR = \
 	zlib openssl \
+	live555 \
+	libre \
 
 .PHONY: all
 all:
