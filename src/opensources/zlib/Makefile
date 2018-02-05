@@ -6,7 +6,7 @@ SOURCE_FILE := $(SOURCE).tar.gz
 SOURCE_URL  := https://www.zlib.net/$(SOURCE_FILE)
 PATCH_DIR   := $(CURDIR)/patch
 
-INSTALL_PREFIX := $(TOP)/prefix
+INSTALL_PREFIX := $(TOP)/build
 INSTALL_INCDIR := $(INSTALL_PREFIX)/include
 INSTALL_LIBDIR := $(INSTALL_PREFIX)/lib
 INSTALL_BINDIR := $(INSTALL_PREFIX)/bin
