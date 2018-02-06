@@ -62,7 +62,7 @@ configure: download
 			./configure \
 			--prefix=$(INSTALL_PREFIX) \
 			--host=$(PLATFORM) \
-			--with-sysroot=/opt/buildroot-gcc463/usr/mipsel-buildroot-linux-uclibc/sysroot \
+			--with-sysroot=/opt/buildroot-gcc463/usr/mipsel-buildroot-linux-uclibc/sysroot/usr \
 			--disable-cpp \
 		&& touch .configured \
 		&& cd -; \
