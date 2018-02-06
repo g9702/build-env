@@ -1,4 +1,5 @@
 SUBDIR = \
+	pcre \
 	zlib openssl \
 	live555 \
 	libx264 \
