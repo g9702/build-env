@@ -5,6 +5,7 @@ SUBDIR = \
 	libfdk-aac \
 	live555 \
 	libre \
+	ffmpeg \
 
 .PHONY: all
 all:
