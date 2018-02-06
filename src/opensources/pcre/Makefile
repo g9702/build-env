@@ -11,8 +11,9 @@ INSTALL_INCDIR := $(INSTALL_PREFIX)/include
 INSTALL_LIBDIR := $(INSTALL_PREFIX)/lib
 INSTALL_BINDIR := $(INSTALL_PREFIX)/bin
 
-CROSS_COMPILE := /opt/buildroot-gcc463/usr/bin/mipsel-linux-
+SYSROOT  := /opt/buildroot-gcc463/usr/mipsel-buildroot-linux-uclibc/sysroot/usr
 PLATFORM := mipsel-linux
+CROSS_COMPILE := /opt/buildroot-gcc463/usr/bin/$(PLATFORM)-
 CC       := $(CROSS_COMPILE)gcc
 CPP      := $(CROSS_COMPILE)gcc -E
 CXX      := $(CROSS_COMPILE)g++
@@ -62,7 +63,7 @@ configure: download
 			./configure \
 			--prefix=$(INSTALL_PREFIX) \
 			--host=$(PLATFORM) \
-			--with-sysroot=/opt/buildroot-gcc463/usr/mipsel-buildroot-linux-uclibc/sysroot/usr \
+			--with-sysroot=$(SYSROOT) \
 			--disable-cpp \
 		&& touch .configured \
 		&& cd -; \
