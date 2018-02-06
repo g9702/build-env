@@ -1,8 +1,9 @@
 SUBDIR = \
 	pcre \
 	zlib openssl \
-	live555 \
 	libx264 \
+	libfdk-aac \
+	live555 \
 	libre \
 
 .PHONY: all
